@@ -5,6 +5,11 @@ Tutte le modifiche significative a questo progetto vengono documentate in questo
 Il formato segue [Keep a Changelog](https://keepachangelog.com/it/1.1.0/),
 e questo progetto aderisce a [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-08-25
+
+### Added
+- Il server remoto serve ora la propria favicon (`/favicon.ico`, `/favicon.png`) e l'icona a 512px (`/icon.png`), con il tag `<link rel="icon">` nella pagina indice. La Connectors Directory preleva l'icona del connettore dalla favicon del server MCP, quindi senza questa il connettore sarebbe comparso senza icona.
+
 ## [0.5.2] - 2026-08-25
 
 ### Fixed

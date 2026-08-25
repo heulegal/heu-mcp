@@ -28,6 +28,7 @@ import os
 import secrets
 import sqlite3
 import time
+from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
 import anyio
@@ -614,9 +615,47 @@ async def healthz(request: Request):
     return JSONResponse({"status": "ok", "tools": 28, "resource": RESOURCE_URL})
 
 
+# La directory dei connettori preleva l'icona dalla favicon del server MCP,
+# quindi va servita dallo stesso host.
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+_ICON_CACHE: dict[str, bytes] = {}
+
+
+def _icon_bytes(name: str) -> bytes | None:
+    if name not in _ICON_CACHE:
+        path = ASSETS_DIR / name
+        if not path.is_file():
+            return None
+        _ICON_CACHE[name] = path.read_bytes()
+    return _ICON_CACHE[name]
+
+
+async def favicon(request: Request):
+    data = _icon_bytes("favicon.png")
+    if data is None:
+        return Response(status_code=404)
+    return Response(
+        data,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+async def icon(request: Request):
+    data = _icon_bytes("icon-512.png")
+    if data is None:
+        return Response(status_code=404)
+    return Response(
+        data,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 async def index(request: Request):
     return HTMLResponse(
         "<!doctype html><meta charset='utf-8'><title>HEU Legal MCP</title>"
+        "<link rel='icon' type='image/png' href='/favicon.png'>"
         "<div style=\"font-family:-apple-system,sans-serif;max-width:640px;margin:4rem auto;padding:0 1rem\">"
         "<h1>HEU Legal MCP Server</h1>"
         f"<p>Endpoint MCP: <code>{html.escape(RESOURCE_URL)}</code></p>"
@@ -638,6 +677,9 @@ app = Starlette(
     routes=[
         Route("/", index),
         Route("/healthz", healthz),
+        Route("/favicon.ico", favicon),
+        Route("/favicon.png", favicon),
+        Route("/icon.png", icon),
         Route("/.well-known/oauth-protected-resource", protected_resource_metadata),
         Route(f"/.well-known/oauth-protected-resource{MCP_PATH}", protected_resource_metadata),
         Route("/.well-known/oauth-authorization-server", authorization_server_metadata),
