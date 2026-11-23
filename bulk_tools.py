@@ -40,9 +40,10 @@ REMOTE_ONLY_ARGUMENTS = {CREATE: ("upload_id",)}
 _CREATE_COMMON = (
     "Una riga = un documento. Usalo SEMPRE al posto di chiamare create_pdf_document più volte: "
     "i dati delle righe non passano dalla conversazione e la risposta contiene solo conteggi. "
-    "Esegui prima con dry_run=true (default): verifica tutte le righe (email, campi obbligatori "
-    "del template, limiti, duplicati) senza inviare nulla e mostra la mappatura colonne → firmatari "
-    "e campi, dedotta dalle intestazioni (correggibile con column_mapping). "
+    "Esegui prima con dry_run=true (default): verifica tutte le righe (nomi ed email dei firmatari, "
+    "limiti, duplicati) senza inviare nulla e mostra la mappatura colonne → firmatari e campi, dedotta "
+    "dalle intestazioni (correggibile con column_mapping). I campi di testo senza colonna non sono "
+    "un errore: li compila il firmatario quando firma. "
     "IMPORTANTE: mostra il riepilogo all'utente e chiedi conferma esplicita prima di dry_run=false. "
     "Le righe con errori vengono saltate, le altre inviate; un errore non ferma l'invio. "
 )
@@ -227,9 +228,7 @@ class MappingProblem(bulk.BulkError):
             "problemi": self.mapping.problems,
             "colonne_del_file": self.table.headers,
             "firmatari_del_template": [s.label for s in self.template.signers],
-            "campi_testo_del_template": [
-                {"etichetta": f.label or f.id, "obbligatorio": f.required} for f in self.template.fields
-            ],
+            "campi_testo_del_template": [bulk.field_display(self.template, f) for f in self.template.fields],
             "suggerimento": "Correggi con column_mapping oppure rinomina le colonne del file.",
         }
 

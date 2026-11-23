@@ -270,7 +270,7 @@ async def fetch_template(request: RequestFn, source_id: str) -> Template:
         for p in (_data(body) or [])
         if p.get("type") == "text"
     ]
-    return Template(id=str(source_id), name=meta.get("name") or "Documento", signers=signers, fields=fields)
+    return Template(id=str(source_id), name=(meta.get("name") or "Documento").strip(), signers=signers, fields=fields)
 
 
 # ========================================================================== mapping
@@ -295,18 +295,33 @@ class Mapping:
     fields: dict[str, str]  # placeholder id -> column
     document_name: str | None  # column name or pattern with {Column} placeholders
     problems: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)  # non-blocking remarks shown in the dry run
 
     def describe(self, template: Template) -> dict:
         """Compact, human-readable view of the mapping for the dry-run summary."""
-        labels = {f.id: f.label or f.id for f in template.fields}
-        return {
+        prefilled = {field_display(template, f): self.fields[f.id] for f in template.fields if f.id in self.fields}
+        by_signer = [field_display(template, f) for f in template.fields if f.id not in self.fields]
+        out = {
             "firmatari": {
                 s.label: {"nome": " + ".join(s.name_columns) or None, "email": s.email_column}
                 for s in self.signers
             },
-            "campi": {labels.get(fid, fid): col for fid, col in self.fields.items()},
-            "nome_documento": self.document_name,
+            "campi_precompilati": prefilled,
+            "nome_documento": self.document_name or "<nome template> - <primo firmatario>",
         }
+        if by_signer:
+            out["campi_compilati_dal_firmatario"] = by_signer
+        if self.notes:
+            out["avvisi"] = self.notes
+        return out
+
+
+def field_display(template: Template, f: TemplateField) -> str:
+    """Field name as the user sees it, qualified by signer when the label is not unique."""
+    label = f.label or f.id
+    if sum(1 for g in template.fields if (g.label or g.id) == label) > 1:
+        return f"{label} ({template.signer_label(f.signer_id)})"
+    return label
 
 
 def _find(headers: list[str], candidates: list[str]) -> str | None:
@@ -394,22 +409,46 @@ def build_mapping(headers: list[str], template: Template, overrides: dict | None
             problems.append(f"Nessuna colonna per l'email del firmatario '{lab}'.")
         signer_maps.append(sm)
 
+    # Text fields belong to a signer. Unmapped fields (or blank cells) are not an error:
+    # HEU asks that signer to fill them in while signing. A label shared by several
+    # fields (e.g. one "Nome" per signer) only matches signer-qualified columns.
     field_map: dict[str, str] = {}
+    notes: list[str] = []
+    signer_columns = {c for sm in signer_maps for c in sm.name_columns + [sm.email_column] if c}
+    label_count: dict[str, int] = {}
     for f in template.fields:
+        label_count[norm(f.label)] = label_count.get(norm(f.label), 0) + 1
+    for f in template.fields:
+        signer = template.signer_label(f.signer_id)
+        shared = bool(f.label) and label_count[norm(f.label)] > 1
         col = None
         for key, val in o_fields.items():
-            if key == f.id or (f.label and norm(key) == norm(f.label)):
+            nk = norm(key)
+            qualified = {norm(f"{f.label} ({signer})"), norm(f"{f.label} {signer}"), norm(f"{signer} {f.label}")}
+            if key == f.id or (f.label and nk in qualified) or (f.label and not shared and nk == norm(f.label)):
                 col = _resolve_column(headers, val)
                 if not col:
-                    problems.append(f"Colonna '{val}' indicata per il campo '{f.label or f.id}' non trovata.")
+                    problems.append(f"Colonna '{val}' indicata per il campo '{key}' non trovata.")
+            elif f.label and shared and nk == norm(f.label):
+                problems.append(
+                    f"Il campo '{key}' esiste per più firmatari: indica quale, es. '{f.label} ({signer})'."
+                )
         if not col and f.label:
-            col = _find(headers, [f.label])
+            candidates = [f"{f.label} {signer}", f"{signer} {f.label}"] if shared else [f.label]
+            found = [c for c in (_find(headers, [cand]) for cand in candidates) if c]
+            # Prefer a column dedicated to the field over one already used for the signer's name/email.
+            dedicated = [c for c in found if c not in signer_columns]
+            col = (dedicated or found or [None])[0]
         if col:
             field_map[f.id] = col
-        elif f.required:
-            problems.append(
-                f"Campo obbligatorio '{f.label or f.id}' (firmatario '{template.signer_label(f.signer_id)}') "
-                "senza colonna corrispondente."
+    shared_labels = sorted({f.label for f in template.fields if f.label and label_count[norm(f.label)] > 1})
+    for label in shared_labels:
+        if _find(headers, [label]) and not any(
+            norm(c) == norm(label) for c in field_map.values()
+        ):
+            notes.append(
+                f"La colonna '{label}' non è stata usata: nel template '{label}' esiste per più firmatari. "
+                f"Per precompilarla usa colonne come '{label} <nome firmatario>' o column_mapping."
             )
 
     doc_name = None
@@ -420,7 +459,7 @@ def build_mapping(headers: list[str], template: Template, overrides: dict | None
     else:
         doc_name = _find(headers, ["nome documento", "document name", "titolo", "nome contratto"])
 
-    return Mapping(signers=signer_maps, fields=field_map, document_name=doc_name, problems=problems)
+    return Mapping(signers=signer_maps, fields=field_map, document_name=doc_name, problems=problems, notes=notes)
 
 
 def _fill_pattern(pattern: str, row: dict[str, str]) -> str:
@@ -495,10 +534,6 @@ def validate_row(row: dict[str, str], mapping: Mapping, template: Template) -> l
             if key in seen_emails:
                 errors.append(f"'{sm.label}' e '{seen_emails[key]}' hanno la stessa email")
             seen_emails[key] = sm.label
-    for f in template.fields:
-        col = mapping.fields.get(f.id)
-        if f.required and col and not row.get(col, "").strip():
-            errors.append(f"campo obbligatorio '{f.label or f.id}' vuoto")
     name = row_document_name(row, mapping, template)
     if len(name) > MAX_DOCUMENT_NAME:
         errors.append(f"nome documento oltre {MAX_DOCUMENT_NAME} caratteri")

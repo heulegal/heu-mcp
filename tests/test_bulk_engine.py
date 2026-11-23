@@ -105,11 +105,13 @@ async def test_mapping_multi_signer_by_label():
     assert m.problems == []
 
 
-async def test_mapping_reports_missing_required_and_overrides():
+async def test_mapping_reports_missing_signer_columns_and_overrides():
     tpl = await template()
     m = bulk.build_mapping(["Nominativo", "Posta"], tpl)
     assert any("email" in p for p in m.problems)
-    assert any("Indirizzo" in p for p in m.problems)
+    # A text field without a column is not a problem: the signer fills it in while signing.
+    assert not any("Indirizzo" in p for p in m.problems)
+    assert m.describe(tpl)["campi_compilati_dal_firmatario"] == ["Indirizzo", "Note"]
     m = bulk.build_mapping(
         ["Nominativo", "Posta", "Via"], tpl,
         {"firmatari": {"Cliente": {"email": "Posta"}}, "campi": {"Indirizzo": "Via"},
@@ -129,7 +131,7 @@ async def test_validation_and_duplicates():
         "Mario Rossi;mario@x.it;Via Roma 1\n"   # ok
         "Anna;non-una-email;Via Po 2\n"          # bad email
         ";luca@x.it;Via Po 3\n"                  # missing name
-        "Gino;gino@x.it;\n"                      # missing required field
+        "Gino;gino@x.it;\n"                      # blank field: left to the signer, not an error
         "Mario Rossi;MARIO@x.it;Via Roma 1\n"    # duplicate of row 2 (email case-insensitive)
     ), "l.csv")
     m = bulk.build_mapping(t.headers, tpl)
@@ -138,11 +140,13 @@ async def test_validation_and_duplicates():
     assert states[2][0] == bulk.STATE_PENDING
     assert "non valida" in states[3][1]
     assert "nome" in states[4][1]
-    assert "Indirizzo" in states[5][1]
+    assert states[5][0] == bulk.STATE_PENDING
     assert "duplicato della riga 2" in states[6][1]
     s = bulk.summarize(plan, dry_run=True)
-    assert s["righe_valide"] == 1 and s["righe_con_errori"] == 4
-    assert len(s["errori_principali"]) == 4
+    assert s["righe_valide"] == 2 and s["righe_con_errori"] == 3
+    assert len(s["errori_principali"]) == 3
+    payload = bulk.build_payload(plan.rows[3].data, m, tpl, "o", "t")
+    assert "placeholders" not in payload  # blank cell is not sent as an empty value
 
 
 async def test_same_email_for_two_signers_rejected():
@@ -367,3 +371,45 @@ async def test_new_row_identical_to_a_sent_one_is_a_duplicate():
     plan = bulk.plan_rows(t, bulk.build_mapping(t.headers, tpl), tpl)
     assert plan.rows[0].state == bulk.STATE_SENT
     assert plan.rows[1].state == bulk.STATE_INVALID and "duplicato della riga 2" in plan.rows[1].error
+
+
+async def test_shared_field_label_across_signers_like_real_templates():
+    # Mirrors the real test-account template: one text field "Nome" per signer.
+    api = FakeHeuApi(
+        signers=[{"id": "107328", "full_name": "Firmatario #01"}, {"id": "107329", "full_name": "Firmatario #02"}],
+        placeholders=[
+            {"id": "a", "signer_id": "107328", "type": "text", "text_label": "Nome", "required": True},
+            {"id": "b", "signer_id": "107329", "type": "text", "text_label": "Nome", "required": True},
+        ],
+    )
+    tpl = await template(api)
+    # A bare "Nome" column must not fill both signers' fields with the same value:
+    # each field takes its own signer's column, and the dry run says so.
+    m = bulk.build_mapping(["Nome Firmatario #01", "Email Firmatario #01", "Nome Firmatario #02",
+                            "Email Firmatario #02", "Nome"], tpl)
+    assert m.fields == {"a": "Nome Firmatario #01", "b": "Nome Firmatario #02"} and m.problems == []
+    view = m.describe(tpl)
+    assert view["campi_precompilati"] == {"Nome (Firmatario #01)": "Nome Firmatario #01",
+                                          "Nome (Firmatario #02)": "Nome Firmatario #02"}
+    assert "avvisi" in view and "'Nome' non è stata usata" in view["avvisi"][0]
+    # Without signer-specific columns, the fields are left to the signers.
+    m = bulk.build_mapping(["Nominativo 1", "Mail 1", "Nominativo 2", "Mail 2", "Nome"], tpl,
+                           {"firmatari": {"Firmatario #01": {"nome": "Nominativo 1", "email": "Mail 1"},
+                                          "Firmatario #02": {"nome": "Nominativo 2", "email": "Mail 2"}}})
+    assert m.fields == {} and m.problems == []
+    assert m.describe(tpl)["campi_compilati_dal_firmatario"] == ["Nome (Firmatario #01)", "Nome (Firmatario #02)"]
+    # Signer-qualified columns are matched to the right field...
+    m = bulk.build_mapping(["Nome Firmatario #01", "Email Firmatario #01", "Nome Firmatario #02",
+                            "Email Firmatario #02", "Nome Firmatario #01 ", "Firmatario #02 Nome"], tpl)
+    assert m.fields["b"] == "Firmatario #02 Nome"
+    # ...and an ambiguous override is refused with a clear message.
+    m = bulk.build_mapping(["A", "B", "C", "D", "X"], tpl,
+                           {"firmatari": {"Firmatario #01": {"nome": "A", "email": "B"},
+                                          "Firmatario #02": {"nome": "C", "email": "D"}},
+                            "campi": {"Nome": "X"}})
+    assert any("più firmatari" in p for p in m.problems)
+    m = bulk.build_mapping(["A", "B", "C", "D", "X"], tpl,
+                           {"firmatari": {"Firmatario #01": {"nome": "A", "email": "B"},
+                                          "Firmatario #02": {"nome": "C", "email": "D"}},
+                            "campi": {"Nome (Firmatario #02)": "X"}})
+    assert m.problems == [] and m.fields == {"b": "X"}

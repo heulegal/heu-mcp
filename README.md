@@ -192,8 +192,10 @@ Un file `.csv` o `.xlsx` con **una riga per documento**. Le colonne vengono coll
 |---|---|
 | Un solo firmatario | `Nome` (oppure `Nome` + `Cognome`), `Email` |
 | Più firmatari, es. "Cliente" e "Fornitore" | `Nome Cliente` / `Cliente`, `Email Cliente`, `Nome Fornitore`, ... |
-| Campi di testo | colonna con lo stesso nome dell'etichetta del campo (es. `Indirizzo`) |
+| Campi di testo | colonna con lo stesso nome dell'etichetta del campo (es. `Indirizzo`). Se l'etichetta è ripetuta per più firmatari, per esempio un campo `Nome` per ciascuno, servono colonne che nominano il firmatario, come `Nome Cliente` |
 | Nome del documento (facoltativo) | `Nome documento`; altrimenti `<nome template> - <primo firmatario>` |
+
+Un campo di testo **senza colonna, o con la cella vuota, non è un errore**: in HEU ogni campo appartiene a un firmatario, che lo compila al momento della firma. La verifica mostra quali campi vengono precompilati dal file e quali restano ai firmatari.
 
 La mappatura si può correggere con `column_mapping`, per esempio:
 
@@ -203,7 +205,7 @@ La mappatura si può correggere con `column_mapping`, per esempio:
  "nome_documento": "Contratto {Ragione sociale}"}
 ```
 
-**Sempre in due passi.** Con `dry_run=true` (default) il tool verifica tutte le righe senza inviare nulla (email, campi obbligatori del template, limiti dell'API, duplicati) e mostra la mappatura usata. Solo dopo la conferma dell'utente si invia con `dry_run=false`.
+**Sempre in due passi.** Con `dry_run=true` (default) il tool verifica tutte le righe senza inviare nulla (nomi ed email dei firmatari, limiti dell'API, duplicati) e mostra la mappatura usata. Solo dopo la conferma dell'utente si invia con `dry_run=false`.
 
 **Durante l'invio:** circa una richiesta al secondo, per restare nel limite dell'API; sui `429` si rispetta `Retry-After`; errori di rete e `5xx` vengono ritentati. Una riga con errori non ferma le altre. L'invio si interrompe da solo solo per problemi che colpirebbero tutte le righe (API key revocata, crediti FEA esauriti).
 

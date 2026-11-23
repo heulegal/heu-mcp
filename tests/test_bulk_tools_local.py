@@ -44,7 +44,7 @@ async def test_dry_run_sends_nothing_and_replies_short(api, tmp_path):
     out = await call("create_pdf_documents_bulk", file_path=path, **BASE)
     assert out["righe_totali"] == 400 and out["righe_valide"] == 398 and out["righe_con_errori"] == 2
     assert api.created == []
-    assert out["mappatura"]["campi"] == {"Indirizzo": "Indirizzo"}
+    assert out["mappatura"]["campi_precompilati"] == {"Indirizzo": "Indirizzo"}
     # The reply never carries the rows themselves.
     assert "Persona 5" not in json.dumps(out)
     assert (tmp_path / "invio.esito.csv").exists()
