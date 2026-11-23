@@ -12,7 +12,7 @@ WORKDIR /app
 COPY requirements.txt requirements-remote.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -r requirements-remote.txt
 
-COPY server.py remote_server.py ./
+COPY server.py remote_server.py bulk.py bulk_tools.py bulk_remote.py storage.py ./
 COPY assets/ ./assets/
 
 # Il volume monta /data: la directory deve esistere anche senza volume (dev locale).

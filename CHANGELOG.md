@@ -5,6 +5,30 @@ Tutte le modifiche significative a questo progetto vengono documentate in questo
 Il formato segue [Keep a Changelog](https://keepachangelog.com/it/1.1.0/),
 e questo progetto aderisce a [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-23
+
+### Added
+- **`create_pdf_documents_bulk`**: invio in firma dello stesso template a centinaia di destinatari da un file CSV o XLSX, in un'unica operazione e senza che i dati delle righe passino dalla conversazione.
+  - Mappatura automatica delle colonne sui firmatari e sui campi di testo del template (nome o nome + cognome, email, etichette dei campi), correggibile con `column_mapping`.
+  - `dry_run=true` di default: verifica email, campi obbligatori, limiti dell'API e righe duplicate, e restituisce solo un riepilogo (al massimo 20 errori elencati).
+  - Invio con circa una richiesta al secondo, rispetto di `Retry-After` sui 429, nuovi tentativi su errori di rete e 5xx, nessuno stop al primo errore; stop solo per problemi che colpirebbero tutte le righe (API key revocata, crediti FEA esauriti).
+  - File di esito con le stesse righe più `document_id`, `stato` ed `errore`, aggiornato dopo ogni riga. Rilanciando sullo stesso file, o caricando il file di esito, le righe già inviate vengono saltate. Una riga interrotta durante l'invio non viene mai reinviata alla cieca: si adotta il documento creato se è univoco, altrimenti la riga resta `da_verificare`.
+- **`download_pdf_bundles_bulk`**: download in blocco dei bundle firmati, selezionati per elenco di ID o per cartella (tag HEU), stato, intervallo di date e testo nel nome. Nomi file leggibili (`<nome documento> - <id>`) e copia unica facoltativa in PDF con l'audit trail in coda, come copia di consultazione: il bundle originale, che ha valore legale, non viene modificato.
+- **Operazioni in blocco nel connettore remoto**, con due nuovi tool, `get_bulk_upload_link` e `get_bulk_job_status`:
+  - caricamento del file tramite una pagina personale e temporanea;
+  - lavori eseguiti in background uno alla volta, per non esaurire il limite dell'API condiviso tra gli utenti;
+  - file di esito e archivi ZIP scaricabili da link che scadono con il lavoro;
+  - ripresa automatica dopo un riavvio del server;
+  - cancellazione di tutti i dati dopo 24 ore;
+  - righe cifrate nel database e file caricati cifrati prima dello storage;
+  - storage S3-compatibile a consumo (Tigris) quando è configurato `BUCKET_NAME`.
+- Parametro `verbose` per `create_pdf_document`, `create_heu_document`, `create_pdf_document_from_upload`, `create_pdf_template` e `update_pdf_template`.
+- Test per lettura CSV/XLSX, mappatura, validazione, invio con errori parziali e limiti dell'API, ripresa da file di esito e dopo un riavvio, isolamento tra utenti, pagina di caricamento, archivio di download, pulizia dopo 24 ore e flusso completo OAuth + MCP via HTTP. Tutte le chiamate all'API HEU sono simulate.
+
+### Changed
+- **Risposte compatte**: i tool che creano o modificano documenti restituiscono ID, nome, stato, tipo di firma e firmatari ridotti a ID ed email. Per i template, invece delle coordinate di ogni campo, il numero di campi per tipo. **Cambia il formato restituito**: chi leggeva campi come `created_at`, `has_read` o le posizioni dei placeholder deve passare `verbose=true`.
+- Nuove dipendenze: `openpyxl` (base) e `boto3` (extra `remote`).
+
 ## [0.5.4] - 2026-11-23
 
 ### Security

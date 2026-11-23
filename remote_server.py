@@ -19,6 +19,7 @@ Endpoint pubblici:
 License: MIT
 """
 
+import asyncio
 import base64
 import contextlib
 import hashlib
@@ -41,7 +42,9 @@ from starlette.routing import Mount, Route
 
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
+import bulk_remote
 import server as heu
+import storage
 
 # Shared multi-tenant deployment: hide and refuse tools that touch local paths.
 heu.set_remote_mode(True)
@@ -567,10 +570,11 @@ def _unauthorized(description: str = "Autenticazione richiesta") -> Response:
     )
 
 
-def _api_key_for_token(bearer: str) -> str | None:
+def _credentials_for_token(bearer: str) -> tuple[str, str] | None:
+    """Return (HEU API key, grant id) for a valid access token."""
     with _db() as c:
         row = c.execute(
-            "SELECT g.heu_key_enc AS enc, g.revoked AS revoked, t.expires_at AS exp"
+            "SELECT g.heu_key_enc AS enc, g.revoked AS revoked, t.expires_at AS exp, g.grant_id AS grant_id"
             " FROM tokens t JOIN grants g ON g.grant_id = t.grant_id"
             " WHERE t.token_hash = ? AND t.kind = 'access'",
             (_hash(bearer),),
@@ -578,9 +582,37 @@ def _api_key_for_token(bearer: str) -> str | None:
     if not row or row["revoked"] or row["exp"] < int(time.time()):
         return None
     try:
-        return _decrypt(row["enc"])
+        return _decrypt(row["enc"]), row["grant_id"]
     except InvalidToken:
         return None
+
+
+def _api_key_for_token(bearer: str) -> str | None:
+    creds = _credentials_for_token(bearer)
+    return creds[0] if creds else None
+
+
+def _api_key_for_grant(grant_id: str) -> str | None:
+    """Decrypted HEU API key of a grant, for background jobs; None if revoked."""
+    with _db() as c:
+        row = c.execute("SELECT heu_key_enc, revoked FROM grants WHERE grant_id = ?", (grant_id,)).fetchone()
+    if not row or row["revoked"]:
+        return None
+    try:
+        return _decrypt(row["heu_key_enc"])
+    except InvalidToken:
+        return None
+
+
+bulk_backend = bulk_remote.RemoteBulkBackend(
+    db=_db,
+    storage=storage.from_environment(Path(DB_PATH).parent / "bulk"),
+    public_url=PUBLIC_URL,
+    encrypt=_encrypt,
+    decrypt=_decrypt,
+    key_for_grant=_api_key_for_grant,
+)
+heu.set_bulk_backend(bulk_backend)
 
 
 session_manager = StreamableHTTPSessionManager(app=heu.app, json_response=False, stateless=True)
@@ -600,14 +632,17 @@ class McpEndpoint:
         if not auth.lower().startswith("bearer "):
             await _unauthorized()(scope, receive, send)
             return
-        api_key = await anyio.to_thread.run_sync(_api_key_for_token, auth[7:].strip())
-        if not api_key:
+        creds = await anyio.to_thread.run_sync(_credentials_for_token, auth[7:].strip())
+        if not creds:
             await _unauthorized("Token non valido o scaduto")(scope, receive, send)
             return
+        api_key, grant_id = creds
         tok = heu.set_api_key(api_key)
+        ptok = heu.set_principal(grant_id)
         try:
             await session_manager.handle_request(scope, receive, send)
         finally:
+            heu._principal_var.reset(ptok)
             heu._api_key_var.reset(tok)
 
 
@@ -672,8 +707,16 @@ async def index(request: Request):
 @contextlib.asynccontextmanager
 async def lifespan(app):
     init_db()
-    async with session_manager.run():
-        yield
+    bulk_backend.init_db()
+    worker = asyncio.create_task(bulk_backend.run_forever()) if os.getenv("HEU_BULK_WORKER", "1") == "1" else None
+    try:
+        async with session_manager.run():
+            yield
+    finally:
+        if worker:
+            worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await worker
 
 
 app = Starlette(
@@ -691,6 +734,8 @@ app = Starlette(
         Route("/authorize", authorize_get, methods=["GET"]),
         Route("/authorize", authorize_post, methods=["POST"]),
         Route("/token", token, methods=["POST"]),
+        Route("/bulk/upload/{token}", bulk_backend.upload_page, methods=["GET", "POST"]),
+        Route("/bulk/files/{token}", bulk_backend.file_download, methods=["GET"]),
         # Il path esatto va servito da una Route: un Mount da solo risponderebbe
         # 307 verso "/mcp/", mentre i client MCP interrogano l'URL senza slash.
         Route(MCP_PATH, mcp_endpoint, methods=["GET", "POST", "DELETE", "OPTIONS"]),

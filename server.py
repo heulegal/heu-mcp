@@ -24,6 +24,9 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent, ToolAnnotations
 
+import bulk
+import bulk_tools
+
 # La API key è per-richiesta: in modalità stdio viene dall'ambiente, in modalità
 # remota multi-utente la imposta il layer HTTP dopo aver validato il bearer token.
 _api_key_var: ContextVar[str] = ContextVar("heu_api_key", default=os.getenv("HEU_API_KEY", ""))
@@ -36,6 +39,19 @@ def set_api_key(key: str):
 
 def get_api_key() -> str:
     return _api_key_var.get()
+
+
+# Identity of the connected user on the remote server (the OAuth grant id), used
+# to scope bulk uploads and jobs to their owner. Empty in stdio mode.
+_principal_var: ContextVar[str] = ContextVar("heu_principal", default="")
+
+
+def set_principal(principal: str):
+    return _principal_var.set(principal or "")
+
+
+def get_principal() -> str:
+    return _principal_var.get()
 BASE_URL = os.getenv("HEU_BASE_URL", "https://api.heulegal.com/v1").rstrip("/")
 DOWNLOAD_DIR = Path(os.getenv("HEU_DOWNLOAD_DIR", "/tmp"))
 
@@ -92,6 +108,68 @@ def _err(status: int, body, hint: str | None = None) -> list[TextContent]:
     if hint:
         msg["hint"] = hint
     return [TextContent(type="text", text=json.dumps(msg, indent=2, ensure_ascii=False, default=str))]
+
+
+# ---------------------------------------------------------------- compact replies
+# Tools that create or modify documents return only what the conversation needs
+# (id, status, signers). Full API objects are available with verbose=true.
+
+VERBOSE_PROP = {
+    "type": "boolean",
+    "description": "Se true restituisce l'oggetto completo dell'API invece del riepilogo. Default: false.",
+}
+
+
+def _payload_data(body):
+    return body.get("data", body) if isinstance(body, dict) else body
+
+
+def _compact_pdf_document(body):
+    d = _payload_data(body)
+    if not isinstance(d, dict) or "id" not in d:
+        return body
+    out = {k: d.get(k) for k in ("id", "name", "status", "signature_type") if d.get(k) is not None}
+    signers = d.get("signers")
+    if isinstance(signers, list):
+        out["signers"] = [
+            {k: s.get(k) for k in ("id", "full_name", "email") if s.get(k) is not None}
+            for s in signers if isinstance(s, dict)
+        ]
+    return out
+
+
+def _compact_heu_document(body):
+    d = _payload_data(body)
+    if not isinstance(d, dict) or "id" not in d:
+        return body
+    out = {k: d.get(k) for k in ("id", "name", "status", "type") if d.get(k) is not None}
+    members = d.get("members")
+    if isinstance(members, list):
+        out["members"] = [
+            {k: m.get(k) for k in ("email", "role") if m.get(k) is not None}
+            for m in members if isinstance(m, dict)
+        ]
+    return out
+
+
+def _compact_template(body):
+    d = _payload_data(body)
+    if not isinstance(d, dict) or "id" not in d:
+        return body
+    out = {k: d.get(k) for k in ("id", "name", "type") if d.get(k) is not None}
+    if isinstance(d.get("signers"), list):
+        out["signers"] = [
+            {k: s.get(k) for k in ("id", "full_name") if s.get(k) is not None}
+            for s in d["signers"] if isinstance(s, dict)
+        ]
+    placeholders = d.get("placeholders")
+    if isinstance(placeholders, list):
+        by_type: dict[str, int] = {}
+        for ph in placeholders:
+            t = ph.get("type", "?") if isinstance(ph, dict) else "?"
+            by_type[t] = by_type.get(t, 0) + 1
+        out["placeholders"] = {"totale": len(placeholders), "per_tipo": by_type}
+    return out
 
 
 def _check_config() -> str | None:
@@ -544,6 +622,7 @@ async def _all_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "verbose": VERBOSE_PROP,
                     "source_document_id": {"type": "string", "description": "ID del template sorgente"},
                     "document_name": {"type": "string", "description": "Nome del nuovo documento"},
                     "document_type": {"type": "string", "enum": ["document", "template"], "description": "Default: document"},
@@ -797,6 +876,7 @@ async def _all_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "verbose": VERBOSE_PROP,
                     "source_document_id": {"type": "string", "description": "ID del template PDF sorgente"},
                     "document_name": {"type": "string", "description": "Nome del nuovo documento"},
                     "signature_type": {"type": "string", "enum": ["fes", "fea"], "description": "Tipo firma. Default: fes"},
@@ -980,6 +1060,7 @@ async def _all_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "verbose": VERBOSE_PROP,
                     "file_path": {"type": "string", "description": "Path locale del file PDF da caricare (max 5 MB)"},
                     "document_name": {"type": "string", "description": "Nome del template"},
                     "signers": {"type": "array", "items": template_signer_schema, "description": "Firmatari del template (senza email)"},
@@ -1011,6 +1092,7 @@ async def _all_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "verbose": VERBOSE_PROP,
                     "file_path": {"type": "string", "description": "Path locale del file PDF da caricare (max 5 MB)"},
                     "document_name": {"type": "string", "description": "Nome del documento"},
                     "signature_type": {"type": "string", "enum": ["fes", "fea"], "description": "Tipo firma. Default: fes"},
@@ -1104,6 +1186,7 @@ async def _all_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "verbose": VERBOSE_PROP,
                     "document_id": {"type": "string", "description": "ID del template PDF"},
                     "document_name": {"type": "string", "description": "Nuovo nome del template (opzionale, aggiornato solo se fornito)"},
                     "signers": {"type": "array", "items": template_signer_schema, "description": "Set completo sostitutivo dei firmatari (richiesto)"},
@@ -1164,13 +1247,19 @@ async def _all_tools() -> list[Tool]:
                 openWorldHint=True,
             ),
         ),
-    ]
+    ] + bulk_tools.tool_definitions()
 
 
 async def _dispatch_tool(name: str, arguments: dict) -> list[TextContent]:
     cfg_err = _check_config()
     if cfg_err and name != "get_heu_health":
         return [TextContent(type="text", text=cfg_err)]
+
+    if name in bulk_tools.NAMES:
+        try:
+            return _ok(await _bulk_backend.handle(name, arguments))
+        except bulk.BulkError as e:
+            return _err(400, str(e))
 
     try:
         if name == "get_heu_health":
@@ -1219,7 +1308,9 @@ async def _dispatch_tool(name: str, arguments: dict) -> list[TextContent]:
             if "placeholders" in arguments and arguments["placeholders"]:
                 payload["placeholders"] = arguments["placeholders"]
             status, body, _ = await _request("POST", "/documents", json=payload)
-            return _ok(body) if status in (200, 201) else _err(status, body)
+            if status in (200, 201):
+                return _ok(body if arguments.get("verbose") else _compact_heu_document(body))
+            return _err(status, body)
 
         if name == "prompt_heu_document_signature":
             doc_id = arguments["document_id"]
@@ -1484,7 +1575,7 @@ async def _dispatch_tool(name: str, arguments: dict) -> list[TextContent]:
                 payload["placeholders"] = arguments["placeholders"]
             status, body, _ = await _request("POST", "/pdfs", json=payload)
             if status in (200, 201):
-                return _ok(body)
+                return _ok(body if arguments.get("verbose") else _compact_pdf_document(body))
             hint = None
             if status == 422:
                 hint = "Crediti FEA insufficienti per il numero di firmatari."
@@ -1541,7 +1632,7 @@ async def _dispatch_tool(name: str, arguments: dict) -> list[TextContent]:
                 timeout=DOWNLOAD_TIMEOUT,
             )
             if status in (200, 201):
-                return _ok(body)
+                return _ok(body if arguments.get("verbose") else _compact_template(body))
             hint = None
             if status == 400:
                 hint = "Verifica che il PDF non sia ruotato (rifiutato) e che i placeholder siano validi (posizioni 0-100 esclusi, signer_source_id corrispondenti)."
@@ -1572,7 +1663,7 @@ async def _dispatch_tool(name: str, arguments: dict) -> list[TextContent]:
                 timeout=DOWNLOAD_TIMEOUT,
             )
             if status in (200, 201):
-                return _ok(body)
+                return _ok(body if arguments.get("verbose") else _compact_pdf_document(body))
             hint = None
             if status == 422:
                 hint = "Crediti FEA insufficienti per il numero di firmatari."
@@ -1675,7 +1766,7 @@ async def _dispatch_tool(name: str, arguments: dict) -> list[TextContent]:
                 payload["placeholders"] = arguments["placeholders"]
             status, body, _ = await _request("PUT", f"/pdfs/templates/{doc_id}", json=payload)
             if status == 200:
-                return _ok(body)
+                return _ok(body if arguments.get("verbose") else _compact_template(body))
             hint = None
             if status == 400:
                 hint = "Il documento potrebbe non essere di tipo 'template', o i dati non sono validi."
@@ -1750,9 +1841,7 @@ REMOTE_REFUSAL = (
 )
 
 
-def _remote_view(tool: Tool) -> Tool:
-    """Return the remote-mode version of a tool: local path arguments removed."""
-    blocked = LOCAL_FS_ARGUMENTS.get(tool.name)
+def _strip_arguments(tool: Tool, blocked) -> Tool:
     if not blocked:
         return tool
     schema = json.loads(json.dumps(tool.inputSchema))
@@ -1760,16 +1849,38 @@ def _remote_view(tool: Tool) -> Tool:
         schema.get("properties", {}).pop(arg, None)
         if arg in schema.get("required", []):
             schema["required"] = [r for r in schema["required"] if r != arg]
-    description = tool.description + " Nel connettore remoto funziona solo con document_id."
-    return tool.model_copy(update={"inputSchema": schema, "description": description})
+    return tool.model_copy(update={"inputSchema": schema})
+
+
+def _view(tool: Tool) -> Tool | None:
+    """The version of a tool exposed in the current mode, or None if hidden."""
+    if _remote_mode:
+        if tool.name in LOCAL_FS_TOOLS:
+            return None
+        blocked = LOCAL_FS_ARGUMENTS.get(tool.name, ()) + bulk_tools.LOCAL_ONLY_ARGUMENTS.get(tool.name, ())
+        view = _strip_arguments(tool, blocked)
+        if tool.name in bulk_tools.REMOTE_DESCRIPTIONS:
+            view = view.model_copy(update={"description": bulk_tools.REMOTE_DESCRIPTIONS[tool.name]})
+        elif tool.name in LOCAL_FS_ARGUMENTS:
+            view = view.model_copy(update={"description": tool.description + " Nel connettore remoto funziona solo con document_id."})
+        return view
+    if tool.name in bulk_tools.REMOTE_ONLY_TOOLS:
+        return None
+    return _strip_arguments(tool, bulk_tools.REMOTE_ONLY_ARGUMENTS.get(tool.name, ()))
+
+
+_bulk_backend = bulk_tools.LocalBulkBackend(request=lambda *a, **k: _request(*a, **k))
+
+
+def set_bulk_backend(backend) -> None:
+    """Replace the bulk backend (the remote server installs a job-based one)."""
+    global _bulk_backend
+    _bulk_backend = backend
 
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
-    tools = await _all_tools()
-    if not _remote_mode:
-        return tools
-    return [_remote_view(t) for t in tools if t.name not in LOCAL_FS_TOOLS]
+    return [v for v in (_view(t) for t in await _all_tools()) if v is not None]
 
 
 @app.call_tool()
@@ -1778,11 +1889,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     if _remote_mode:
         if name in LOCAL_FS_TOOLS:
             return _err(403, REMOTE_REFUSAL)
-        for arg in LOCAL_FS_ARGUMENTS.get(name, ()):
+        blocked = LOCAL_FS_ARGUMENTS.get(name, ()) + bulk_tools.LOCAL_ONLY_ARGUMENTS.get(name, ())
+        for arg in blocked:
             if arguments.get(arg):
                 return _err(403, REMOTE_REFUSAL)
     return await _dispatch_tool(name, arguments)
-
 
 async def _run():
     async with stdio_server() as (read, write):
