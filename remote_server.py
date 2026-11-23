@@ -43,6 +43,9 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 import server as heu
 
+# Shared multi-tenant deployment: hide and refuse tools that touch local paths.
+heu.set_remote_mode(True)
+
 # ---------------------------------------------------------------- configurazione
 
 PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:8080").rstrip("/")
@@ -612,7 +615,8 @@ mcp_endpoint = McpEndpoint()
 
 
 async def healthz(request: Request):
-    return JSONResponse({"status": "ok", "tools": 28, "resource": RESOURCE_URL})
+    tools = await heu.list_tools()
+    return JSONResponse({"status": "ok", "tools": len(tools), "resource": RESOURCE_URL})
 
 
 # La directory dei connettori preleva l'icona dalla favicon del server MCP,

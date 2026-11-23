@@ -363,8 +363,7 @@ def _extract_pdf_text(pdf_bytes: bytes, pages_spec: str | None, max_pages: int =
     }
 
 
-@app.list_tools()
-async def list_tools():
+async def _all_tools() -> list[Tool]:
     placeholders_kv_schema = {
         "type": "object",
         "description": "Mappa key->value dei placeholder da sostituire nel template (chiave = nome placeholder)",
@@ -1168,8 +1167,7 @@ async def list_tools():
     ]
 
 
-@app.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+async def _dispatch_tool(name: str, arguments: dict) -> list[TextContent]:
     cfg_err = _check_config()
     if cfg_err and name != "get_heu_health":
         return [TextContent(type="text", text=cfg_err)]
@@ -1706,6 +1704,84 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Errore HTTP: {str(e)}")]
     except Exception as e:
         return [TextContent(type="text", text=f"Errore: {str(e)}\n{traceback.format_exc()}")]
+
+
+# --------------------------------------------------------------------------
+# Remote mode: tools that read or write paths on the local filesystem are only
+# meaningful when the server runs on the user's own machine (stdio). On the
+# shared remote server those paths would point at the server's disk, letting one
+# tenant read files another tenant downloaded (e.g. via locate_pdf_text) or
+# overwrite server state (e.g. output_path=/data/heu-mcp.db). In remote mode such
+# tools are hidden from tools/list and refused if called by name.
+# --------------------------------------------------------------------------
+
+LOCAL_FS_TOOLS = frozenset({
+    "download_heu_document_pdf",
+    "download_pdf_document",
+    "download_pdf_audit_trail",
+    "download_pdf_bundle",
+    "preview_pdf_template",
+    "create_pdf_template",
+    "create_pdf_document_from_upload",
+})
+
+# Tools that stay available remotely but must not accept a local path argument.
+LOCAL_FS_ARGUMENTS = {
+    "locate_pdf_text": ("file_path",),
+}
+
+_remote_mode = False
+
+
+def set_remote_mode(enabled: bool = True) -> None:
+    """Enable the restrictions for the shared, multi-tenant remote server."""
+    global _remote_mode
+    _remote_mode = bool(enabled)
+
+
+def is_remote_mode() -> bool:
+    return _remote_mode
+
+
+REMOTE_REFUSAL = (
+    "Questo strumento legge o salva file sul computer dell'utente, quindi non è disponibile "
+    "nel connettore remoto. Usa la versione locale del server HEU MCP "
+    "(https://github.com/heulegal/heu-mcp) per questa operazione."
+)
+
+
+def _remote_view(tool: Tool) -> Tool:
+    """Return the remote-mode version of a tool: local path arguments removed."""
+    blocked = LOCAL_FS_ARGUMENTS.get(tool.name)
+    if not blocked:
+        return tool
+    schema = json.loads(json.dumps(tool.inputSchema))
+    for arg in blocked:
+        schema.get("properties", {}).pop(arg, None)
+        if arg in schema.get("required", []):
+            schema["required"] = [r for r in schema["required"] if r != arg]
+    description = tool.description + " Nel connettore remoto funziona solo con document_id."
+    return tool.model_copy(update={"inputSchema": schema, "description": description})
+
+
+@app.list_tools()
+async def list_tools() -> list[Tool]:
+    tools = await _all_tools()
+    if not _remote_mode:
+        return tools
+    return [_remote_view(t) for t in tools if t.name not in LOCAL_FS_TOOLS]
+
+
+@app.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    arguments = arguments or {}
+    if _remote_mode:
+        if name in LOCAL_FS_TOOLS:
+            return _err(403, REMOTE_REFUSAL)
+        for arg in LOCAL_FS_ARGUMENTS.get(name, ()):
+            if arguments.get(arg):
+                return _err(403, REMOTE_REFUSAL)
+    return await _dispatch_tool(name, arguments)
 
 
 async def _run():

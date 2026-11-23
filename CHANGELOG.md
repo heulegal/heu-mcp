@@ -5,6 +5,14 @@ Tutte le modifiche significative a questo progetto vengono documentate in questo
 Il formato segue [Keep a Changelog](https://keepachangelog.com/it/1.1.0/),
 e questo progetto aderisce a [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-11-23
+
+### Security
+- **Server remoto:** i tool che leggono o scrivono percorsi del filesystem (`download_heu_document_pdf`, `download_pdf_document`, `download_pdf_audit_trail`, `download_pdf_bundle`, `preview_pdf_template`, `create_pdf_template`, `create_pdf_document_from_upload`) e il parametro `file_path` di `locate_pdf_text` non sono più esposti né eseguibili in modalità remota. Sul server condiviso quei percorsi puntavano al disco del server: un utente poteva leggere il testo di contratti scaricati da un altro utente (via `locate_pdf_text` sui file in `/tmp`) o sovrascrivere file del server, incluso il database delle sessioni OAuth. La modalità locale (stdio) è invariata.
+
+### Added
+- Prima suite di test (`tests/`, pytest) con i casi di regressione per la modalità remota.
+
 ## [0.5.3] - 2026-08-25
 
 ### Added
