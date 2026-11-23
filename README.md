@@ -138,6 +138,8 @@ heu-mcp-remote
 fly launch --no-deploy
 fly volumes create heu_data --size 1
 fly storage create   # bucket Tigris a consumo per i file delle operazioni in blocco
+# fly storage create crea un bucket globale: per tenere i dati in UE, prima di metterlo in uso
+# apri `fly storage dashboard <bucket>` → Storage settings → Bucket locations → Dual regions → ams + fra
 fly secrets set HEU_MCP_SECRET_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
 fly secrets set PUBLIC_URL="https://<nome-app>.fly.dev"
 fly deploy
@@ -231,7 +233,7 @@ Per ogni documento salva il **bundle originale** (PDF firmato, audit trail, arte
 
 ### Conservazione dei dati (server remoto)
 
-File caricati, righe dei lavori, file di esito e archivi restano sul server **per 24 ore** e poi vengono cancellati automaticamente. Le righe sono cifrate nel database e i file caricati sono cifrati prima di arrivare allo storage. Ogni caricamento, lavoro e link appartiene all'utente che l'ha creato: gli altri utenti non possono vederli né usarli. I link di download sono personali e scadono con il lavoro; chiunque abbia il link può scaricare il file finché è valido, quindi va trattato come un documento riservato.
+**I dati restano nell'Unione Europea**: il server e il suo database sono a Parigi, mentre lo storage dei file (Tigris) è vincolato ad Amsterdam e Francoforte. File caricati, righe dei lavori, file di esito e archivi restano sul server **per 24 ore** e poi vengono cancellati automaticamente. Le righe sono cifrate nel database e i file caricati sono cifrati prima di arrivare allo storage. Ogni caricamento, lavoro e link appartiene all'utente che l'ha creato: gli altri utenti non possono vederli né usarli. I link di download sono personali e scadono con il lavoro; chiunque abbia il link può scaricare il file finché è valido, quindi va trattato come un documento riservato.
 
 ### Risposte compatte
 
